@@ -1,7 +1,2 @@
 streamlit
-numpy
-pandas
-yfinance
-scikit-learn
-tensorflow
-altair
+
