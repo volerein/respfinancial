@@ -71,6 +71,7 @@ soupsieve==2.5
 SQLAlchemy==2.0.30
 streamlit==1.31.1
 tenacity==8.2.3
+tensorflow
 tensorboard==2.16.2
 tensorboard-data-server==0.7.2
 termcolor==2.4.0
