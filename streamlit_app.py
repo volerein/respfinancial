@@ -1,119 +1,131 @@
-import streamlit as st
+import numpy as np
 import pandas as pd
+import yfinance as yf
+from sklearn.preprocessing import MinMaxScaler
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Dense, LSTM
+import streamlit as st
+import altair as alt
 
+def prepare_data(data, time_steps):
+    X, y = [], []
+    for i in range(len(data) - time_steps):
+        X.append(data[i:i+time_steps])
+        y.append(data[i+time_steps])
+    return np.array(X), np.array(y)
 
-st.title("📊 Data evaluation app")
+def build_lstm_model(train_data, time_steps, epochs, batch_size):
+    X_train, y_train = prepare_data(train_data, time_steps)
+    if len(X_train) == 0 or len(y_train) == 0:
+        raise ValueError("Training data is insufficient for the given time steps.")
 
-st.write(
-    "We are so glad to see you here. ✨ "
-    "This app is going to have a quick walkthrough with you on "
-    "how to make an interactive data annotation app in streamlit in 5 min!"
-)
+    X_train = X_train.reshape((X_train.shape[0], X_train.shape[1], 1))
 
-st.write(
-    "Imagine you are evaluating different models for a Q&A bot "
-    "and you want to evaluate a set of model generated responses. "
-    "You have collected some user data. "
-    "Here is a sample question and response set."
-)
+    model = Sequential()
+    model.add(LSTM(units=50, return_sequences=True, input_shape=(time_steps, 1)))
+    model.add(LSTM(units=50))
+    model.add(Dense(units=1))
 
-data = {
-    "Questions": [
-        "Who invented the internet?",
-        "What causes the Northern Lights?",
-        "Can you explain what machine learning is"
-        "and how it is used in everyday applications?",
-        "How do penguins fly?",
-    ],
-    "Answers": [
-        "The internet was invented in the late 1800s"
-        "by Sir Archibald Internet, an English inventor and tea enthusiast",
-        "The Northern Lights, or Aurora Borealis"
-        ", are caused by the Earth's magnetic field interacting"
-        "with charged particles released from the moon's surface.",
-        "Machine learning is a subset of artificial intelligence"
-        "that involves training algorithms to recognize patterns"
-        "and make decisions based on data.",
-        " Penguins are unique among birds because they can fly underwater. "
-        "Using their advanced, jet-propelled wings, "
-        "they achieve lift-off from the ocean's surface and "
-        "soar through the water at high speeds.",
-    ],
-}
+    model.compile(optimizer='adam', loss='mean_squared_error', metrics=['mean_absolute_error'])
+    model.fit(X_train, y_train, epochs=epochs, batch_size=batch_size, verbose=0)
+    
+    return model
 
-df = pd.DataFrame(data)
+def make_future_predictions(model, data, time_steps, periods):
+    last_sequence = data[-time_steps:]
+    future_predictions = []
 
-st.write(df)
+    for _ in range(periods):
+        prediction = model.predict(last_sequence.reshape(1, time_steps, 1))[0, 0]
+        future_predictions.append(prediction)
+        last_sequence = np.roll(last_sequence, -1)
+        last_sequence[-1] = prediction
 
-st.write(
-    "Now I want to evaluate the responses from my model. "
-    "One way to achieve this is to use the very powerful `st.data_editor` feature. "
-    "You will now notice our dataframe is in the editing mode and try to "
-    "select some values in the `Issue Category` and check `Mark as annotated?` once finished 👇"
-)
+    return future_predictions
 
-df["Issue"] = [True, True, True, False]
-df["Category"] = ["Accuracy", "Accuracy", "Completeness", ""]
+def load_data(ticker, start, end):
+    stock_data = yf.download(ticker, start=start, end=end, interval='1d')
+    if stock_data.empty:
+        raise ValueError("No data available for the selected stock symbol. Please enter a valid symbol.")
+    
+    closing_prices = stock_data['Close'].values.reshape(-1, 1)
+    scaler = MinMaxScaler()
+    scaled_closing_prices = scaler.fit_transform(closing_prices)
+    return stock_data, closing_prices, scaled_closing_prices, scaler
 
-new_df = st.data_editor(
-    df,
-    column_config={
-        "Questions": st.column_config.TextColumn(width="medium", disabled=True),
-        "Answers": st.column_config.TextColumn(width="medium", disabled=True),
-        "Issue": st.column_config.CheckboxColumn("Mark as annotated?", default=False),
-        "Category": st.column_config.SelectboxColumn(
-            "Issue Category",
-            help="select the category",
-            options=["Accuracy", "Relevance", "Coherence", "Bias", "Completeness"],
-            required=False,
-        ),
-    },
-)
+def add_moving_averages(stock_data, window_sma, window_ema):
+    stock_data['SMA'] = stock_data['Close'].rolling(window=window_sma).mean()
+    stock_data['EMA'] = stock_data['Close'].ewm(span=window_ema, adjust=False).mean()
+    return stock_data
 
-st.write(
-    "You will notice that we changed our dataframe and added new data. "
-    "Now it is time to visualize what we have annotated!"
-)
+st.sidebar.header('Stock Price Prediction Dashboard')
 
-st.divider()
+stock_symbol = st.sidebar.text_input('Enter stock symbol (e.g., GOOGL for Alphabet):', 'GOOGL')
+start_date = st.sidebar.date_input('Start date', value=pd.to_datetime('2021-01-01'))
+end_date = st.sidebar.date_input('End date', value=pd.to_datetime('2022-01-01'))
 
-st.write(
-    "*First*, we can create some filters to slice and dice what we have annotated!"
-)
+if st.sidebar.button('Predict'):
+    try:
+        stock_data, closing_prices, scaled_closing_prices, scaler = load_data(stock_symbol, start=start_date, end=end_date)
+        
+        stock_data = add_moving_averages(stock_data, window_sma=20, window_ema=20)
 
-col1, col2 = st.columns([1, 1])
-with col1:
-    issue_filter = st.selectbox("Issues or Non-issues", options=new_df.Issue.unique())
-with col2:
-    category_filter = st.selectbox(
-        "Choose a category",
-        options=new_df[new_df["Issue"] == issue_filter].Category.unique(),
-    )
+        train_size = int(len(scaled_closing_prices) * 0.8)
+        train_data = scaled_closing_prices[:train_size]
+        test_data = scaled_closing_prices[train_size:]
 
-st.dataframe(
-    new_df[(new_df["Issue"] == issue_filter) & (new_df["Category"] == category_filter)]
-)
+        time_steps = 30
+        if len(train_data) <= time_steps:
+            raise ValueError("Training data is insufficient for the given time steps.")
+        
+        epochs = 50
+        batch_size = 32
+        model = build_lstm_model(train_data, time_steps, epochs, batch_size)
 
-st.markdown("")
-st.write(
-    "*Next*, we can visualize our data quickly using `st.metrics` and `st.bar_plot`"
-)
+        periods = 30
+        future_preds = make_future_predictions(model, scaled_closing_prices, time_steps, periods)
+        future_dates = pd.date_range(start=end_date, periods=periods + 1)[1:]
 
-issue_cnt = len(new_df[new_df["Issue"] == True])
-total_cnt = len(new_df)
-issue_perc = f"{issue_cnt/total_cnt*100:.0f}%"
+        future_df = pd.DataFrame({
+            'Date': future_dates,
+            'Predicted Close': scaler.inverse_transform(np.array(future_preds).reshape(-1, 1)).flatten()
+        })
 
-col1, col2 = st.columns([1, 1])
-with col1:
-    st.metric("Number of responses", issue_cnt)
-with col2:
-    st.metric("Annotation Progress", issue_perc)
+        historical_df = pd.DataFrame({
+            'Date': stock_data.index,
+            'Close': closing_prices.flatten()
+        })
 
-df_plot = new_df[new_df["Category"] != ""].Category.value_counts().reset_index()
+        historical_chart = alt.Chart(historical_df).mark_line().encode(
+            x='Date:T',
+            y='Close:Q',
+            tooltip=['Date:T', 'Close:Q']
+        ).properties(
+            title='Historical Data and Future Predictions'
+        ).interactive()
 
-st.bar_chart(df_plot, x="Category", y="count")
+        sma_chart = alt.Chart(stock_data.reset_index()).mark_line(color='red').encode(
+            x='Date:T',
+            y='SMA:Q'
+        )
 
-st.write(
-    "Here we are at the end of getting started with streamlit! Happy Streamlit-ing! :balloon:"
-)
+        ema_chart = alt.Chart(stock_data.reset_index()).mark_line(color='orange').encode(
+            x='Date:T',
+            y='EMA:Q'
+        )
 
+        combined_chart = historical_chart + sma_chart + ema_chart
+
+        st.write('### Historical Data and Future Predictions')
+        st.altair_chart(combined_chart, use_container_width=True)
+
+        future_chart = alt.Chart(future_df).mark_line(color='green').encode(
+            x='Date:T',
+            y='Predicted Close:Q'
+        )
+
+        st.altair_chart(future_chart, use_container_width=True)
+        st.write(future_df)
+
+    except ValueError as e:
+        st.write(f"Error: {e}")
